@@ -18,8 +18,8 @@
 use super::GAS_LIMIT;
 use crate::{
 	AccountIdLookupOf, AccountIdOf, BalanceOf, Code, CodeHash, CollectEvents, Config,
-	ContractExecResult, ContractInstantiateResult, DebugInfo, Determinism, EventRecordOf,
-	ExecReturnValue, InstantiateReturnValue, OriginFor, Pallet, Weight,
+	ContractExecResult, ContractInstantiateResult, DebugInfo, EventRecordOf, ExecReturnValue,
+	InstantiateReturnValue, Origin, OriginFor, Pallet, Weight,
 };
 use codec::{Encode, HasCompact};
 use core::fmt::Debug;
@@ -88,7 +88,7 @@ builder!(
 	/// Create an [`InstantiateWithCodeBuilder`] with default values.
 	pub fn instantiate_with_code(origin: OriginFor<T>, code: Vec<u8>) -> Self {
 		Self {
-			origin: origin,
+			origin,
 			value: 0u32.into(),
 			gas_limit: GAS_LIMIT,
 			storage_deposit_limit: None,
@@ -156,7 +156,7 @@ builder!(
 			code,
 			data: vec![],
 			salt: vec![],
-			debug: DebugInfo::Skip,
+			debug: DebugInfo::UnsafeDebug,
 			collect_events: CollectEvents::Skip,
 		}
 	}
@@ -168,7 +168,7 @@ builder!(
 		dest: AccountIdLookupOf<T>,
 		value: BalanceOf<T>,
 		gas_limit: Weight,
-		storage_deposit_limit: Option<<BalanceOf<T> as codec::HasCompact>::Type>,
+		storage_deposit_limit: Option<<BalanceOf<T> as HasCompact>::Type>,
 		data: Vec<u8>,
 	) -> DispatchResultWithPostInfo;
 
@@ -187,7 +187,7 @@ builder!(
 
 builder!(
 	bare_call(
-		origin: AccountIdOf<T>,
+		origin: Origin<T>,
 		dest: AccountIdOf<T>,
 		value: BalanceOf<T>,
 		gas_limit: Weight,
@@ -195,7 +195,6 @@ builder!(
 		data: Vec<u8>,
 		debug: DebugInfo,
 		collect_events: CollectEvents,
-		determinism: Determinism,
 	) -> ContractExecResult<BalanceOf<T>, EventRecordOf<T>>;
 
 	/// Build the call and unwrap the result.
@@ -204,7 +203,7 @@ builder!(
 	}
 
 	/// Create a [`BareCallBuilder`] with default values.
-	pub fn bare_call(origin: AccountIdOf<T>, dest: AccountIdOf<T>) -> Self {
+	pub fn bare_call(origin: Origin<T>, dest: AccountIdOf<T>) -> Self {
 		Self {
 			origin,
 			dest,
@@ -212,9 +211,8 @@ builder!(
 			gas_limit: GAS_LIMIT,
 			storage_deposit_limit: None,
 			data: vec![],
-			debug: DebugInfo::Skip,
+			debug: DebugInfo::UnsafeDebug,
 			collect_events: CollectEvents::Skip,
-			determinism: Determinism::Enforced,
 		}
 	}
 );
