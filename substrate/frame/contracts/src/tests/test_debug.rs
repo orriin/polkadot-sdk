@@ -114,7 +114,7 @@ mod run_tests {
 
 		fn deploy(wasm: Vec<u8>) -> AccountId32 {
 			Contracts::bare_instantiate(
-				ALICE,
+				RuntimeOrigin::signed(ALICE),
 				0,
 				GAS_LIMIT,
 				None,
@@ -198,7 +198,7 @@ mod run_tests {
 			let _ = Balances::deposit_creating(&ALICE, 1_000_000);
 
 			let account_id = Contracts::bare_instantiate(
-				ALICE,
+				RuntimeOrigin::signed(ALICE),
 				0,
 				GAS_LIMIT,
 				None,

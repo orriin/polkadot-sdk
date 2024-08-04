@@ -19,7 +19,7 @@ use super::GAS_LIMIT;
 use crate::{
 	AccountIdLookupOf, AccountIdOf, BalanceOf, Code, CodeHash, CollectEvents, Config,
 	ContractExecResult, ContractInstantiateResult, DebugInfo, EventRecordOf, ExecReturnValue,
-	InstantiateReturnValue, Origin, OriginFor, Pallet, Weight,
+	InstantiateReturnValue, OriginFor, Pallet, Weight,
 };
 use codec::{Encode, HasCompact};
 use core::fmt::Debug;
@@ -126,7 +126,7 @@ builder!(
 
 builder!(
 	bare_instantiate(
-		origin: AccountIdOf<T>,
+		origin: OriginFor<T>,
 		value: BalanceOf<T>,
 		gas_limit: Weight,
 		storage_deposit_limit: Option<BalanceOf<T>>,
@@ -147,7 +147,7 @@ builder!(
 		self.build().result.unwrap().account_id
 	}
 
-	pub fn bare_instantiate(origin: AccountIdOf<T>, code: Code<CodeHash<T>>) -> Self {
+	pub fn bare_instantiate(origin: OriginFor<T>, code: Code<CodeHash<T>>) -> Self {
 		Self {
 			origin,
 			value: 0u32.into(),
@@ -187,7 +187,7 @@ builder!(
 
 builder!(
 	bare_call(
-		origin: Origin<T>,
+		origin: OriginFor<T>,
 		dest: AccountIdOf<T>,
 		value: BalanceOf<T>,
 		gas_limit: Weight,
@@ -203,7 +203,7 @@ builder!(
 	}
 
 	/// Create a [`BareCallBuilder`] with default values.
-	pub fn bare_call(origin: Origin<T>, dest: AccountIdOf<T>) -> Self {
+	pub fn bare_call(origin: OriginFor<T>, dest: AccountIdOf<T>) -> Self {
 		Self {
 			origin,
 			dest,

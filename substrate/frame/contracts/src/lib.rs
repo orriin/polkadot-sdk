@@ -109,9 +109,7 @@ pub mod weights;
 #[cfg(test)]
 mod tests;
 use crate::{
-	exec::{
-		AccountIdOf, ErrorOrigin, ExecError, Executable, Ext, Key, MomentOf, Stack as ExecStack,
-	},
+	exec::{AccountIdOf, ExecError, Executable, Ext, Key, MomentOf, Stack as ExecStack},
 	gas::GasMeter,
 	storage::{meter::Meter as StorageMeter, ContractInfo, DeletionQueueManager},
 	wasm::{CodeInfo, WasmBlob},
@@ -127,7 +125,7 @@ use frame_support::{
 	ensure,
 	traits::{
 		fungible::{Inspect, Mutate, MutateHold},
-		ConstU32, Contains, Get, Time,
+		ConstU32, Contains, EnsureOrigin, Get, Time,
 	},
 	weights::{Weight, WeightMeter},
 	BoundedVec, DefaultNoBound, RuntimeDebugNoBound,
@@ -140,7 +138,7 @@ use frame_system::{
 use scale_info::TypeInfo;
 use smallvec::Array;
 use sp_runtime::{
-	traits::{BadOrigin, Convert, Dispatchable, Saturating, StaticLookup, Zero},
+	traits::{BadOrigin, Convert, Dispatchable, Saturating, StaticLookup},
 	DispatchError, RuntimeDebug,
 };
 
@@ -693,7 +691,7 @@ pub mod pallet {
 		) -> DispatchResultWithPostInfo {
 			let dest = T::Lookup::lookup(dest)?;
 			let mut output = Self::bare_call(
-				Origin::from_runtime_origin(origin)?,
+				origin,
 				dest,
 				value,
 				gas_limit,
@@ -728,27 +726,27 @@ pub mod pallet {
 			data: Vec<u8>,
 			salt: Vec<u8>,
 		) -> DispatchResultWithPostInfo {
-			Migration::<T>::ensure_migrated()?;
-			let origin = T::InstantiateOrigin::ensure_origin(origin)?;
 			let data_len = data.len() as u32;
 			let salt_len = salt.len() as u32;
-			let common = CommonInput {
-				origin: Origin::from_account_id(origin),
+			let mut output = Self::bare_instantiate(
+				origin,
 				value,
-				data,
 				gas_limit,
-				storage_deposit_limit: storage_deposit_limit.map(Into::into),
-				debug_message: None,
-			};
-			let mut output = InstantiateInput::<T> { code: WasmCode::CodeHash(code_hash), salt }
-				.run_guarded(common);
+				storage_deposit_limit.map(Into::into),
+				Code::Existing(code_hash),
+				data,
+				salt,
+				DebugInfo::Skip,
+				CollectEvents::Skip,
+			);
 			if let Ok(retval) = &output.result {
-				if retval.1.did_revert() {
+				if retval.result.did_revert() {
 					output.result = Err(<Error<T>>::ContractReverted.into());
 				}
 			}
-			output.gas_meter.into_dispatch_result(
-				output.result.map(|(_address, output)| output),
+			dispatch_result(
+				output.result.map(|result| result.result),
+				output.gas_consumed,
 				T::WeightInfo::instantiate(data_len, salt_len),
 			)
 		}
@@ -792,48 +790,28 @@ pub mod pallet {
 			data: Vec<u8>,
 			salt: Vec<u8>,
 		) -> DispatchResultWithPostInfo {
-			Migration::<T>::ensure_migrated()?;
-
-			// These two origins will usually be the same; however, we treat them as separate since
-			// it is possible for the `Success` value of `UploadOrigin` and `InstantiateOrigin` to
-			// differ.
-			let upload_origin = T::UploadOrigin::ensure_origin(origin.clone())?;
-			let instantiate_origin = T::InstantiateOrigin::ensure_origin(origin)?;
-
 			let code_len = code.len() as u32;
-
-			let (module, upload_deposit) = Self::try_upload_code(
-				upload_origin,
-				code,
-				storage_deposit_limit.clone().map(Into::into),
-				None,
-			)?;
-
-			// Reduces the storage deposit limit by the amount that was reserved for the upload.
-			let storage_deposit_limit =
-				storage_deposit_limit.map(|limit| limit.into().saturating_sub(upload_deposit));
-
 			let data_len = data.len() as u32;
 			let salt_len = salt.len() as u32;
-			let common = CommonInput {
-				origin: Origin::from_account_id(instantiate_origin),
+			let mut output = Self::bare_instantiate(
+				origin,
 				value,
-				data,
 				gas_limit,
-				storage_deposit_limit,
-				debug_message: None,
-			};
-
-			let mut output =
-				InstantiateInput::<T> { code: WasmCode::Wasm(module), salt }.run_guarded(common);
+				storage_deposit_limit.map(Into::into),
+				Code::Upload(code),
+				data,
+				salt,
+				DebugInfo::Skip,
+				CollectEvents::Skip,
+			);
 			if let Ok(retval) = &output.result {
-				if retval.1.did_revert() {
+				if retval.result.did_revert() {
 					output.result = Err(<Error<T>>::ContractReverted.into());
 				}
 			}
-
-			output.gas_meter.into_dispatch_result(
-				output.result.map(|(_address, output)| output),
+			dispatch_result(
+				output.result.map(|result| result.result),
+				output.gas_consumed,
 				T::WeightInfo::instantiate_with_code(code_len, data_len, salt_len),
 			)
 		}
@@ -1214,28 +1192,6 @@ impl<T: Config> Origin<T> {
 	}
 }
 
-/// Context of a contract invocation.
-struct CommonInput<'a, T: Config> {
-	origin: Origin<T>,
-	value: BalanceOf<T>,
-	data: Vec<u8>,
-	gas_limit: Weight,
-	storage_deposit_limit: Option<BalanceOf<T>>,
-	debug_message: Option<&'a mut DebugBufferVec<T>>,
-}
-
-/// Reference to an existing code hash or a new wasm module.
-enum WasmCode<T: Config> {
-	Wasm(WasmBlob<T>),
-	CodeHash(CodeHash<T>),
-}
-
-/// Input specific to a contract instantiation invocation.
-struct InstantiateInput<T: Config> {
-	code: WasmCode<T>,
-	salt: Vec<u8>,
-}
-
 /// Determines whether events should be collected during execution.
 #[derive(
 	Copy, Clone, PartialEq, Eq, RuntimeDebug, Decode, Encode, MaxEncodedLen, scale_info::TypeInfo,
@@ -1269,19 +1225,10 @@ pub enum DebugInfo {
 	Skip,
 }
 
-/// Return type of private helper functions.
-struct InternalOutput<T: Config, O> {
-	/// The gas meter that was used to execute the call.
-	gas_meter: GasMeter<T>,
-	/// The storage deposit used by the call.
-	storage_deposit: StorageDeposit<BalanceOf<T>>,
-	/// The result of the call.
-	result: Result<O, ExecError>,
-}
-
 // Set up a global reference to the boolean flag used for the re-entrancy guard.
 environmental!(executing_contract: bool);
 
+/// Run the supplied function `f` if no other instance of this pallet is on the stack.
 fn run_guarded<T: Config, R, F: FnOnce() -> Result<R, ExecError>>(f: F) -> Result<R, ExecError> {
 	executing_contract::using_once(&mut false, || {
 		executing_contract::with(|f| {
@@ -1316,139 +1263,6 @@ fn dispatch_result<R>(
 		.map_err(|e| DispatchErrorWithPostInfo { post_info, error: e })
 }
 
-/// Helper trait to wrap contract execution entry points into a single function
-/// [`Invokable::run_guarded`].
-trait Invokable<T: Config>: Sized {
-	/// What is returned as a result of a successful invocation.
-	type Output;
-
-	/// Single entry point to contract execution.
-	/// Downstream execution flow is branched by implementations of [`Invokable`] trait:
-	///
-	/// - [`InstantiateInput::run`] runs contract instantiation,
-	/// - [`CallInput::run`] runs contract call.
-	///
-	/// We enforce a re-entrancy guard here by initializing and checking a boolean flag through a
-	/// global reference.
-	fn run_guarded(self, common: CommonInput<T>) -> InternalOutput<T, Self::Output> {
-		let gas_limit = common.gas_limit;
-
-		// Check whether the origin is allowed here. The logic of the access rules
-		// is in the `ensure_origin`, this could vary for different implementations of this
-		// trait. For example, some actions might not allow Root origin as they could require an
-		// AccountId associated with the origin.
-		if let Err(e) = self.ensure_origin(common.origin.clone()) {
-			return InternalOutput {
-				gas_meter: GasMeter::new(gas_limit),
-				storage_deposit: Default::default(),
-				result: Err(ExecError { error: e.into(), origin: ErrorOrigin::Caller }),
-			}
-		}
-
-		executing_contract::using_once(&mut false, || {
-			executing_contract::with(|f| {
-				// Fail if already entered contract execution
-				if *f {
-					return Err(())
-				}
-				// We are entering contract execution
-				*f = true;
-				Ok(())
-			})
-			.expect("Returns `Ok` if called within `using_once`. It is syntactically obvious that this is the case; qed")
-			.map_or_else(
-				|_| InternalOutput {
-					gas_meter: GasMeter::new(gas_limit),
-					storage_deposit: Default::default(),
-					result: Err(ExecError {
-						error: <Error<T>>::ReentranceDenied.into(),
-						origin: ErrorOrigin::Caller,
-					}),
-				},
-				// Enter contract call.
-				|_| self.run(common, GasMeter::new(gas_limit)),
-			)
-		})
-	}
-
-	/// Method that does the actual call to a contract. It can be either a call to a deployed
-	/// contract or a instantiation of a new one.
-	///
-	/// Called by dispatchables and public functions through the [`Invokable::run_guarded`].
-	fn run(self, common: CommonInput<T>, gas_meter: GasMeter<T>)
-		-> InternalOutput<T, Self::Output>;
-
-	/// This method ensures that the given `origin` is allowed to invoke the current `Invokable`.
-	///
-	/// Called by dispatchables and public functions through the [`Invokable::run_guarded`].
-	fn ensure_origin(&self, origin: Origin<T>) -> Result<(), DispatchError>;
-}
-
-impl<T: Config> Invokable<T> for InstantiateInput<T> {
-	type Output = (AccountIdOf<T>, ExecReturnValue);
-
-	fn run(
-		self,
-		common: CommonInput<T>,
-		mut gas_meter: GasMeter<T>,
-	) -> InternalOutput<T, Self::Output> {
-		let mut storage_deposit = Default::default();
-		let try_exec = || {
-			let schedule = T::Schedule::get();
-			let InstantiateInput { salt, .. } = self;
-			let CommonInput { origin: contract_origin, .. } = common;
-			let origin = contract_origin.account_id()?;
-
-			let executable = match self.code {
-				WasmCode::Wasm(module) => module,
-				WasmCode::CodeHash(code_hash) => WasmBlob::from_storage(code_hash, &mut gas_meter)?,
-			};
-
-			let contract_origin = Origin::from_account_id(origin.clone());
-			let mut storage_meter =
-				StorageMeter::new(&contract_origin, common.storage_deposit_limit, common.value)?;
-			let CommonInput { value, data, debug_message, .. } = common;
-			let result = ExecStack::<T, WasmBlob<T>>::run_instantiate(
-				origin.clone(),
-				executable,
-				&mut gas_meter,
-				&mut storage_meter,
-				&schedule,
-				value,
-				data.clone(),
-				&salt,
-				debug_message,
-			);
-
-			storage_deposit = storage_meter.try_into_deposit(&contract_origin)?;
-			result
-		};
-		InternalOutput { result: try_exec(), gas_meter, storage_deposit }
-	}
-
-	fn ensure_origin(&self, origin: Origin<T>) -> Result<(), DispatchError> {
-		match origin {
-			Origin::Signed(_) => Ok(()),
-			Origin::Root => Err(DispatchError::RootNotAllowed),
-		}
-	}
-}
-
-macro_rules! ensure_no_migration_in_progress {
-	() => {
-		if Migration::<T>::in_progress() {
-			return ContractResult {
-				gas_consumed: Zero::zero(),
-				gas_required: Zero::zero(),
-				storage_deposit: Default::default(),
-				debug_message: Vec::new(),
-				result: Err(Error::<T>::MigrationInProgress.into()),
-				events: None,
-			}
-		}
-	};
-}
-
 impl<T: Config> Pallet<T> {
 	/// A generalized version of [`Self:call`].
 	///
@@ -1457,7 +1271,7 @@ impl<T: Config> Pallet<T> {
 	/// enablement of features that are not suitable for an extrinsic (debugging, event
 	/// collection).
 	pub fn bare_call(
-		origin: Origin<T>,
+		origin: OriginFor<T>,
 		dest: T::AccountId,
 		value: BalanceOf<T>,
 		gas_limit: Weight,
@@ -1473,8 +1287,9 @@ impl<T: Config> Pallet<T> {
 		} else {
 			None
 		};
-		let try_call = || -> Result<ExecReturnValue, ExecError> {
+		let try_call = || {
 			Migration::<T>::ensure_migrated()?;
+			let origin = Origin::from_runtime_origin(origin)?;
 			let mut storage_meter = StorageMeter::new(&origin, storage_deposit_limit, value)?;
 			let schedule = T::Schedule::get();
 			let result = ExecStack::<T, WasmBlob<T>>::run_call(
@@ -1513,7 +1328,7 @@ impl<T: Config> Pallet<T> {
 	/// more information and allows the enablement of features that are not suitable for an
 	/// extrinsic (debugging, event collection).
 	pub fn bare_instantiate(
-		origin: T::AccountId,
+		origin: OriginFor<T>,
 		value: BalanceOf<T>,
 		gas_limit: Weight,
 		mut storage_deposit_limit: Option<BalanceOf<T>>,
@@ -1523,73 +1338,68 @@ impl<T: Config> Pallet<T> {
 		debug: DebugInfo,
 		collect_events: CollectEvents,
 	) -> ContractInstantiateResult<T::AccountId, BalanceOf<T>, EventRecordOf<T>> {
-		ensure_no_migration_in_progress!();
-
+		let mut gas_meter = GasMeter::new(gas_limit);
+		let mut storage_deposit = Default::default();
 		let mut debug_message = if debug == DebugInfo::UnsafeDebug {
 			Some(DebugBufferVec::<T>::default())
 		} else {
 			None
 		};
-		// collect events if CollectEvents is UnsafeCollect
-		let events = || {
-			if collect_events == CollectEvents::UnsafeCollect {
-				Some(System::<T>::read_events_no_consensus().map(|e| *e).collect())
-			} else {
-				None
-			}
+		let try_instantiate = || {
+			Migration::<T>::ensure_migrated()?;
+			let instantiate_account = T::InstantiateOrigin::ensure_origin(origin.clone())?;
+			let (executable, upload_deposit) = match code {
+				Code::Upload(code) => {
+					let upload_account = T::UploadOrigin::ensure_origin(origin.clone())?;
+					let (executable, upload_deposit) = Self::try_upload_code(
+						upload_account,
+						code,
+						storage_deposit_limit,
+						debug_message.as_mut(),
+					)?;
+					if let Some(deposit) = &mut storage_deposit_limit {
+						deposit.saturating_reduce(upload_deposit);
+					}
+					(executable, upload_deposit)
+				},
+				Code::Existing(code_hash) =>
+					(WasmBlob::from_storage(code_hash, &mut gas_meter)?, Default::default()),
+			};
+			let schedule = T::Schedule::get();
+			let instantiate_origin = Origin::from_account_id(instantiate_account.clone());
+			let mut storage_meter =
+				StorageMeter::new(&instantiate_origin, storage_deposit_limit, value)?;
+			let result = ExecStack::<T, WasmBlob<T>>::run_instantiate(
+				instantiate_account,
+				executable,
+				&mut gas_meter,
+				&mut storage_meter,
+				&schedule,
+				value,
+				data.clone(),
+				&salt,
+				debug_message.as_mut(),
+			);
+			storage_deposit = storage_meter
+				.try_into_deposit(&instantiate_origin)?
+				.saturating_add(&StorageDeposit::Charge(upload_deposit));
+			result
 		};
-
-		let (code, upload_deposit): (WasmCode<T>, BalanceOf<T>) = match code {
-			Code::Upload(code) => {
-				let result = Self::try_upload_code(
-					origin.clone(),
-					code,
-					storage_deposit_limit.map(Into::into),
-					debug_message.as_mut(),
-				);
-
-				let (module, deposit) = match result {
-					Ok(result) => result,
-					Err(error) =>
-						return ContractResult {
-							gas_consumed: Zero::zero(),
-							gas_required: Zero::zero(),
-							storage_deposit: Default::default(),
-							debug_message: debug_message.unwrap_or(Default::default()).into(),
-							result: Err(error),
-							events: events(),
-						},
-				};
-
-				storage_deposit_limit =
-					storage_deposit_limit.map(|l| l.saturating_sub(deposit.into()));
-				(WasmCode::Wasm(module), deposit)
-			},
-			Code::Existing(hash) => (WasmCode::CodeHash(hash), Default::default()),
+		let output = run_guarded::<T, _, _>(try_instantiate);
+		let events = if matches!(collect_events, CollectEvents::UnsafeCollect) {
+			Some(System::<T>::read_events_no_consensus().map(|e| *e).collect())
+		} else {
+			None
 		};
-
-		let common = CommonInput {
-			origin: Origin::from_account_id(origin),
-			value,
-			data,
-			gas_limit,
-			storage_deposit_limit,
-			debug_message: debug_message.as_mut(),
-		};
-
-		let output = InstantiateInput::<T> { code, salt }.run_guarded(common);
 		ContractInstantiateResult {
 			result: output
-				.result
 				.map(|(account_id, result)| InstantiateReturnValue { result, account_id })
 				.map_err(|e| e.error),
-			gas_consumed: output.gas_meter.gas_consumed(),
-			gas_required: output.gas_meter.gas_required(),
-			storage_deposit: output
-				.storage_deposit
-				.saturating_add(&StorageDeposit::Charge(upload_deposit)),
+			gas_consumed: gas_meter.gas_consumed(),
+			gas_required: gas_meter.gas_required(),
+			storage_deposit,
 			debug_message: debug_message.unwrap_or_default().to_vec(),
-			events: events(),
+			events,
 		}
 	}
 

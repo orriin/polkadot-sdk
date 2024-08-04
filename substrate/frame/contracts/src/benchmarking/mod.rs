@@ -96,7 +96,7 @@ where
 		let salt = vec![0xff];
 
 		let outcome = Contracts::<T>::bare_instantiate(
-			caller.clone(),
+			RawOrigin::Signed(caller.clone()).into(),
 			0u32.into(),
 			Weight::MAX,
 			None,

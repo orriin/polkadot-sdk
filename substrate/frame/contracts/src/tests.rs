@@ -163,15 +163,15 @@ mod builder {
 	use crate::{
 		test_utils::{builder::*, AccountId32, ALICE},
 		tests::RuntimeOrigin,
-		AccountIdLookupOf, Code, CodeHash, Origin,
+		AccountIdLookupOf, Code, CodeHash,
 	};
 
 	pub fn bare_instantiate(code: Code<CodeHash<Test>>) -> BareInstantiateBuilder<Test> {
-		BareInstantiateBuilder::<Test>::bare_instantiate(ALICE, code)
+		BareInstantiateBuilder::<Test>::bare_instantiate(RuntimeOrigin::signed(ALICE), code)
 	}
 
 	pub fn bare_call(dest: AccountId32) -> BareCallBuilder<Test> {
-		BareCallBuilder::<Test>::bare_call(Origin::from_account_id(ALICE), dest)
+		BareCallBuilder::<Test>::bare_call(RuntimeOrigin::signed(ALICE), dest)
 	}
 
 	pub fn instantiate_with_code(code: Vec<u8>) -> InstantiateWithCodeBuilder<Test> {
@@ -1520,7 +1520,7 @@ mod run_tests {
 			assert_return_code!(result, RuntimeReturnCode::NotCallable);
 
 			let addr_django = builder::bare_instantiate(Code::Upload(callee_code))
-				.origin(CHARLIE)
+				.origin(RuntimeOrigin::signed(CHARLIE))
 				.value(min_balance * 100)
 				.data(vec![0])
 				.build_and_unwrap_account_id();
@@ -3518,7 +3518,7 @@ mod run_tests {
 
 			// Set enough deposit limit for the child instantiate. This should succeed.
 			let result = builder::bare_call(addr_caller.clone())
-				.origin(Origin::from_account_id(BOB))
+				.origin(RuntimeOrigin::signed(BOB))
 				.storage_deposit_limit(Some(codec::Compact(callee_info_len + 2 + ED + 4).into()))
 				.data((1u32, &code_hash_callee, callee_info_len + 2 + ED + 3).encode())
 				.build();
@@ -3895,7 +3895,7 @@ mod run_tests {
 	#[test]
 	fn none_cannot_call_code() {
 		ExtBuilder::default().build().execute_with(|| {
-			assert_noop!(
+			assert_err_ignore_postinfo!(
 				builder::call(BOB).origin(RuntimeOrigin::none()).build(),
 				DispatchError::BadOrigin,
 			);
