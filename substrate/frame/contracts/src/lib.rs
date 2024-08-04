@@ -113,17 +113,17 @@ use crate::{
 		AccountIdOf, ErrorOrigin, ExecError, Executable, Ext, Key, MomentOf, Stack as ExecStack,
 	},
 	gas::GasMeter,
-	storage::{
-		meter::{DepositOf, Meter as StorageMeter},
-		ContractInfo, DeletionQueueManager,
-	},
+	storage::{meter::Meter as StorageMeter, ContractInfo, DeletionQueueManager},
 	wasm::{CodeInfo, WasmBlob},
 };
 use codec::{Codec, Decode, Encode, HasCompact, MaxEncodedLen};
 use core::fmt::Debug;
 use environmental::*;
 use frame_support::{
-	dispatch::{GetDispatchInfo, Pays, PostDispatchInfo, RawOrigin, WithPostDispatchInfo},
+	dispatch::{
+		DispatchErrorWithPostInfo, DispatchResultWithPostInfo, GetDispatchInfo, Pays,
+		PostDispatchInfo, RawOrigin, WithPostDispatchInfo,
+	},
 	ensure,
 	traits::{
 		fungible::{Inspect, Mutate, MutateHold},
@@ -691,23 +691,23 @@ pub mod pallet {
 			storage_deposit_limit: Option<<BalanceOf<T> as codec::HasCompact>::Type>,
 			data: Vec<u8>,
 		) -> DispatchResultWithPostInfo {
-			Migration::<T>::ensure_migrated()?;
-			let common = CommonInput {
-				origin: Origin::from_runtime_origin(origin)?,
-				value,
-				data,
-				gas_limit: gas_limit.into(),
-				storage_deposit_limit: storage_deposit_limit.map(Into::into),
-				debug_message: None,
-			};
 			let dest = T::Lookup::lookup(dest)?;
-			let mut output = CallInput::<T> { dest }.run_guarded(common);
-			if let Ok(retval) = &output.result {
-				if retval.did_revert() {
+			let mut output = Self::bare_call(
+				Origin::from_runtime_origin(origin)?,
+				dest,
+				value,
+				gas_limit,
+				storage_deposit_limit.map(Into::into),
+				data,
+				DebugInfo::Skip,
+				CollectEvents::Skip,
+			);
+			if let Ok(return_value) = &output.result {
+				if return_value.did_revert() {
 					output.result = Err(<Error<T>>::ContractReverted.into());
 				}
 			}
-			output.gas_meter.into_dispatch_result(output.result, T::WeightInfo::call())
+			dispatch_result(output.result, output.gas_consumed, T::WeightInfo::call())
 		}
 
 		/// Instantiates a contract from a previously deployed wasm binary.
@@ -1224,11 +1224,6 @@ struct CommonInput<'a, T: Config> {
 	debug_message: Option<&'a mut DebugBufferVec<T>>,
 }
 
-/// Input specific to a call into contract.
-struct CallInput<T: Config> {
-	dest: T::AccountId,
-}
-
 /// Reference to an existing code hash or a new wasm module.
 enum WasmCode<T: Config> {
 	Wasm(WasmBlob<T>),
@@ -1305,6 +1300,22 @@ fn run_guarded<T: Config, R, F: FnOnce() -> Result<R, ExecError>>(f: F) -> Resul
 	})
 }
 
+/// Create a dispatch result reflecting the amount of consumed gas.
+fn dispatch_result<R>(
+	result: Result<R, DispatchError>,
+	gas_consumed: Weight,
+	base_weight: Weight,
+) -> DispatchResultWithPostInfo {
+	let post_info = PostDispatchInfo {
+		actual_weight: Some(gas_consumed.saturating_add(base_weight)),
+		pays_fee: Default::default(),
+	};
+
+	result
+		.map(|_| post_info)
+		.map_err(|e| DispatchErrorWithPostInfo { post_info, error: e })
+}
+
 /// Helper trait to wrap contract execution entry points into a single function
 /// [`Invokable::run_guarded`].
 trait Invokable<T: Config>: Sized {
@@ -1371,53 +1382,6 @@ trait Invokable<T: Config>: Sized {
 	///
 	/// Called by dispatchables and public functions through the [`Invokable::run_guarded`].
 	fn ensure_origin(&self, origin: Origin<T>) -> Result<(), DispatchError>;
-}
-
-impl<T: Config> Invokable<T> for CallInput<T> {
-	type Output = ExecReturnValue;
-
-	fn run(
-		self,
-		common: CommonInput<T>,
-		mut gas_meter: GasMeter<T>,
-	) -> InternalOutput<T, Self::Output> {
-		let CallInput { dest } = self;
-		let CommonInput { origin, value, data, debug_message, .. } = common;
-		let mut storage_meter =
-			match StorageMeter::new(&origin, common.storage_deposit_limit, common.value) {
-				Ok(meter) => meter,
-				Err(err) =>
-					return InternalOutput {
-						result: Err(err.into()),
-						gas_meter,
-						storage_deposit: Default::default(),
-					},
-			};
-		let schedule = T::Schedule::get();
-		let result = ExecStack::<T, WasmBlob<T>>::run_call(
-			origin.clone(),
-			dest.clone(),
-			&mut gas_meter,
-			&mut storage_meter,
-			&schedule,
-			value,
-			data.clone(),
-			debug_message,
-		);
-
-		match storage_meter.try_into_deposit(&origin) {
-			Ok(storage_deposit) => InternalOutput { gas_meter, storage_deposit, result },
-			Err(err) => InternalOutput {
-				gas_meter,
-				storage_deposit: Default::default(),
-				result: Err(err.into()),
-			},
-		}
-	}
-
-	fn ensure_origin(&self, _origin: Origin<T>) -> Result<(), DispatchError> {
-		Ok(())
-	}
 }
 
 impl<T: Config> Invokable<T> for InstantiateInput<T> {
@@ -1503,12 +1467,13 @@ impl<T: Config> Pallet<T> {
 		collect_events: CollectEvents,
 	) -> ContractExecResult<BalanceOf<T>, EventRecordOf<T>> {
 		let mut gas_meter = GasMeter::new(gas_limit);
+		let mut storage_deposit = Default::default();
 		let mut debug_message = if matches!(debug, DebugInfo::UnsafeDebug) {
 			Some(DebugBufferVec::<T>::default())
 		} else {
 			None
 		};
-		let do_call = || -> Result<(ExecReturnValue, DepositOf<T>), ExecError> {
+		let try_call = || -> Result<ExecReturnValue, ExecError> {
 			Migration::<T>::ensure_migrated()?;
 			let mut storage_meter = StorageMeter::new(&origin, storage_deposit_limit, value)?;
 			let schedule = T::Schedule::get();
@@ -1522,21 +1487,17 @@ impl<T: Config> Pallet<T> {
 				data.clone(),
 				debug_message.as_mut(),
 			)?;
-			let storage_deposit = storage_meter.try_into_deposit(&origin)?;
-			Ok((result, storage_deposit))
+			storage_deposit = storage_meter.try_into_deposit(&origin)?;
+			Ok(result)
 		};
-
-		let result = run_guarded::<T, _, _>(do_call);
-		let storage_deposit = result.as_ref().map(|r| r.1.clone()).unwrap_or_default();
-
+		let result = run_guarded::<T, _, _>(try_call);
 		let events = if matches!(collect_events, CollectEvents::UnsafeCollect) {
 			Some(System::<T>::read_events_no_consensus().map(|e| *e).collect())
 		} else {
 			None
 		};
-
 		ContractExecResult {
-			result: result.map(|r| r.0).map_err(|e| e.error),
+			result: result.map_err(|r| r.error),
 			gas_consumed: gas_meter.gas_consumed(),
 			gas_required: gas_meter.gas_required(),
 			storage_deposit,
