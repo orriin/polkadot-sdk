@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 pub use sc_rpc_api::{child_state::*, state::*};
 
-const STORAGE_KEYS_PAGED_MAX_COUNT: u32 = 1000;
+const STORAGE_KEYS_PAGED_MAX_COUNT: u32 = 1_000_000;
 
 /// State backend API.
 #[async_trait]
